@@ -1,0 +1,17 @@
+[project]
+name = "sentry-aiohttp-deadlock-repro"
+version = "0.1.0"
+description = "Minimal reproduction of GC-triggered deadlock between OpenTelemetry BoundedList, Sentry serializer, and aiohttp connector finalizer"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.9",
+    "sentry-sdk>=2.0",
+    # OTel SDK is needed at runtime: sentry-sdk 2.x uses it as its tracing
+    # backend (creating BoundedList objects with non-reentrant Locks).
+    # This matches the production environment where OTel is installed alongside
+    # sentry-sdk. The repro code does NOT import OTel directly.
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "tornado>=6.0",
+    "python-dotenv>=1.0",
+]
