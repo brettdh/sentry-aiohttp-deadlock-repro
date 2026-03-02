@@ -4,6 +4,11 @@ Minimal reproduction of a GC-triggered deadlock involving `sentry-sdk`,
 `aiohttp`, and the OpenTelemetry SDK (used internally by sentry-sdk 2.x
 as its tracing backend).
 
+> **This is the `main` branch**, which uses the latest package versions.
+> See the [`production-versions`](../../tree/production-versions) branch
+> for a reproduction pinned to the exact versions from our production
+> environment.
+
 ## The deadlock chain
 
 This is a **same-thread** deadlock caused by GC re-entrance:
@@ -50,6 +55,27 @@ lock). An `RLock` allows the same thread to acquire it multiple times without
 blocking, so the serializer's `__iter__` call succeeds and the process completes
 normally.
 
+## Versions tested
+
+This branch uses the **latest** versions of all packages (`sentry-sdk>=2.0`,
+`opentelemetry-sdk>=1.20`, etc.) to confirm the deadlock still exists in
+current releases. The deadlock mechanism is identical across versions, but the
+specific code path that acquires the `BoundedList` lock differs:
+
+| Branch | OTel SDK | Lock acquired during | Processor |
+|--------|----------|---------------------|-----------|
+| **`main`** (this branch) | latest (1.39+) | `span.end()` -> `to_json()` -> `__iter__()` | `SimpleSpanProcessor` |
+| [`production-versions`](../../tree/production-versions) | 1.20.0 | `_prepare()` -> `Span.__init__()` -> `extend()` | `BatchSpanProcessor` |
+
+**Why the code path differs:** In OTel SDK 1.20.0, `Span.__init__` checks
+`if links is None` (identity). Since `Tracer.start_span` defaults `links=()`
+(empty tuple), `() is not None` is `True`, so `BoundedList.from_seq()` ->
+`extend()` is always called, acquiring the lock during every span creation.
+In SDK 1.39.1+, this was changed to `if not links` (truthiness), and `not ()`
+is `True`, so it short-circuits with no lock acquisition during span creation.
+This branch uses `SimpleSpanProcessor` to trigger the lock via `__iter__()`
+during synchronous span export instead.
+
 ## How it works
 
 The worker matches the production environment: OTel tracing is initialized
@@ -85,13 +111,15 @@ or so, with our specific production application and automated testing load).
 
 ## Dependencies
 
-- `sentry-sdk` - logging integration intercepts `logging.error()` and serializes
-  frame locals (`attach_stacktrace=True`)
-- `aiohttp` - `ClientSession.__del__` fires during GC when sessions aren't closed
-- `opentelemetry-sdk` / `opentelemetry-api` - sentry-sdk uses these internally
-  for tracing; `BoundedList` uses a non-reentrant `threading.Lock`
-- `opentelemetry-instrumentation-tornado` - automatically creates spans for each
-  request (matching production), triggering BoundedList lock acquisition on export
-- `opentelemetry-instrumentation-aiohttp-client` - instruments aiohttp sessions
-  (matching production environment)
-- `tornado` - web server matching production architecture
+- `sentry-sdk` (>=2.0) - logging integration intercepts `logging.error()` and
+  serializes frame locals (`attach_stacktrace=True`)
+- `aiohttp` (>=3.9) - `ClientSession.__del__` fires during GC when sessions
+  aren't closed
+- `opentelemetry-sdk` / `opentelemetry-api` (>=1.20) - sentry-sdk uses these
+  internally for tracing; `BoundedList` uses a non-reentrant `threading.Lock`
+- `opentelemetry-instrumentation-tornado` (>=0.40b0) - automatically creates
+  spans for each request (matching production), triggering BoundedList lock
+  acquisition on export
+- `opentelemetry-instrumentation-aiohttp-client` (>=0.40b0) - instruments
+  aiohttp sessions (matching production environment)
+- `tornado` (>=6.0) - web server matching production architecture
