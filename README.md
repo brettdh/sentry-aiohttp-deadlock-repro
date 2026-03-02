@@ -65,26 +65,38 @@ path acquires the `BoundedList` lock:
 | Package | Version | Why pinned |
 |---------|---------|-----------|
 | `sentry-sdk` | 2.42.0 | Production version |
-| `opentelemetry-sdk` | 1.20.x | `Span.__init__` uses `if links is None` (identity check) — always calls `extend()` |
+| `opentelemetry-sdk` | 1.20.x | [`Span.__init__`][v1.20.0-init] uses [`if links is None`][v1.20.0-links-check] (identity check) — always calls [`extend()`][v1.20.0-extend] |
 | `opentelemetry-api` | 1.20.x | Matched to SDK |
 | `opentelemetry-instrumentation-tornado` | 0.41b0 | Production version; requires `setuptools<74` for `pkg_resources` |
 
-**Why these versions matter:** In OTel SDK 1.20.0, `Span.__init__` checks
-`if links is None` (identity). Since `Tracer.start_span` defaults `links=()`
-(empty tuple), `() is not None` is `True`, so `BoundedList.from_seq()` ->
-`extend()` is always called, acquiring the lock during every span creation in
-`_prepare()`. This matches the exact production stack trace. In SDK 1.39.1+,
-this was changed to `if not links` (truthiness), and `not ()` is `True`, so
+**Why these versions matter:** In OTel SDK 1.20.0, [`Span.__init__`][v1.20.0-init] checks
+[`if links is None`][v1.20.0-links-check] (identity). Since [`Tracer.start_span`][v1.20.0-start_span] defaults `links=()`
+(empty tuple), `() is not None` is `True`, so [`BoundedList.from_seq()`][v1.20.0-from_seq] ->
+[`extend()`][v1.20.0-extend] is always called, acquiring the [lock][v1.20.0-lock] during every span creation in
+[`_prepare()`][v0.41b0-prepare]. This matches the exact production stack trace. In SDK 1.39.1,
+this was changed to [`if not links`][v1.39.1-links-check] (truthiness), and `not ()` is `True`, so
 it short-circuits with no lock acquisition during span creation.
 
 | Branch | OTel SDK | Lock acquired during | Processor |
 |--------|----------|---------------------|-----------|
-| [`main`](../../tree/main) | latest (1.39+) | `span.end()` -> `to_json()` -> `__iter__()` | `SimpleSpanProcessor` |
-| **`production-versions`** (this branch) | 1.20.0 | `_prepare()` -> `Span.__init__()` -> `extend()` | `BatchSpanProcessor` |
+| [`main`](../../tree/main) | 1.39.1 | `span.end()` -> [`to_json()`][v1.39.1-to_json] -> [`__iter__()`][v1.39.1-iter] | [`SimpleSpanProcessor`][v1.39.1-simple] |
+| **`production-versions`** (this branch) | 1.20.0 | [`_prepare()`][v0.41b0-prepare] -> [`Span.__init__()`][v1.20.0-init] -> [`extend()`][v1.20.0-extend] | `BatchSpanProcessor` |
 
 The deadlock mechanism (same-thread GC re-entrance on a non-reentrant
-`threading.Lock`) is identical on both branches. Only the entry point into
+[`threading.Lock`][v1.20.0-lock]) is identical on both branches. Only the entry point into
 `BoundedList` differs.
+
+[v1.20.0-init]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L741
+[v1.20.0-links-check]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L792
+[v1.20.0-start_span]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L1047-L1053
+[v1.20.0-lock]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L54
+[v1.20.0-extend]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L78-L84
+[v1.20.0-from_seq]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L86-L91
+[v1.39.1-links-check]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L825-L827
+[v1.39.1-to_json]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L486
+[v1.39.1-iter]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L67-L69
+[v1.39.1-simple]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/trace/export/__init__.py#L104-L109
+[v0.41b0-prepare]: https://github.com/open-telemetry/opentelemetry-python-contrib/blob/v0.41b0/instrumentation/opentelemetry-instrumentation-tornado/src/opentelemetry/instrumentation/tornado/__init__.py#L368-L382
 
 ## How it works
 
@@ -92,9 +104,9 @@ The worker matches the production environment: OTel tracing is initialized
 globally with `TornadoInstrumentor` and a `BatchSpanProcessor` **before**
 Sentry is initialized.
 
-The OTel Tornado instrumentation automatically creates a span in `_prepare()`
-for each incoming request. `Span.__init__()` calls `BoundedList.from_seq()`
--> `extend()` for the span's links, acquiring the `BoundedList` lock on the
+The OTel Tornado instrumentation automatically creates a span in [`_prepare()`][v0.41b0-prepare]
+for each incoming request. [`Span.__init__()`][v1.20.0-init] calls [`BoundedList.from_seq()`][v1.20.0-from_seq]
+-> [`extend()`][v1.20.0-extend] for the span's links, acquiring the `BoundedList` [lock][v1.20.0-lock] on the
 main thread. `GCTriggeringLock` calls `gc.collect()` while the lock is held,
 collecting previously leaked aiohttp sessions and triggering the deadlock chain.
 
@@ -111,7 +123,7 @@ Each request handler:
 Automatic GC is disabled globally; the only `gc.collect()` calls happen
 inside `GCTriggeringLock` (a wrapper that replaces BoundedList's Lock)
 when the lock is acquired on the main thread. When request N arrives and
-`_prepare()` creates a new span -> `BoundedList.extend()` ->
+[`_prepare()`][v0.41b0-prepare] creates a new span -> [`BoundedList.extend()`][v1.20.0-extend] ->
 `GCTriggeringLock.__enter__()` -> `gc.collect()`, the leaked session from
 request N-1 is finalized, triggering the deadlock chain.
 
@@ -129,10 +141,10 @@ or so, with our specific production application and automated testing load).
 - `aiohttp` (>=3.9) - `ClientSession.__del__` fires during GC when sessions
   aren't closed
 - `opentelemetry-sdk` / `opentelemetry-api` (>=1.20, <1.21) - pinned to 1.20.x
-  for the `if links is None` identity check in `Span.__init__`;
-  `BoundedList` uses a non-reentrant `threading.Lock`
+  for the [`if links is None`][v1.20.0-links-check] identity check in [`Span.__init__`][v1.20.0-init];
+  `BoundedList` uses a non-reentrant [`threading.Lock`][v1.20.0-lock]
 - `opentelemetry-instrumentation-tornado` (>=0.41b0, <0.42) - automatically
-  creates spans in `_prepare()`, triggering `BoundedList.extend()` under lock
+  creates spans in [`_prepare()`][v0.41b0-prepare], triggering [`BoundedList.extend()`][v1.20.0-extend] under lock
 - `tornado` (>=6.0) - web server matching production architecture
 - `setuptools` (<74) - required by `opentelemetry-instrumentation` 0.41b0
   which imports `pkg_resources` (removed in setuptools 74+)
