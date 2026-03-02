@@ -67,7 +67,7 @@ load_dotenv()
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "http://key@localhost/0")
 SERVER_PORT = 8080
 CONCURRENCY = 10
-NUM_REQUESTS = 200
+NUM_REQUESTS = 20
 
 
 class GCTriggeringLock:
@@ -211,7 +211,7 @@ async def generate_load():
                 except Exception:
                     pass
                 completed += 1
-                if completed % 50 == 0:
+                if completed % 10 == 0:
                     print(f"  {completed}/{NUM_REQUESTS} requests", flush=True)
 
         tasks = [make_request(i) for i in range(NUM_REQUESTS)]

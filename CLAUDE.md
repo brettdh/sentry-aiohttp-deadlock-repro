@@ -17,6 +17,9 @@ uv run python repro.py
 
 # Run with the RLock fix to verify deadlock is resolved
 uv run python repro.py --with-fix
+
+# Custom timeout (default 5s; CI uses 120s for the with-fix job)
+uv run python repro.py --with-fix --timeout 120
 ```
 
 ## Architecture
@@ -41,8 +44,18 @@ In production, the lock is acquired during `_prepare()` → `start_span()` → `
 
 - **Only patch the lock**: The only acceptable patch to third-party code is replacing `BoundedList`'s `threading.Lock` with `GCTriggeringLock`. Do NOT add extra method calls (e.g. `extend([])` in `__init__`), modify span creation, or otherwise alter third-party behavior to force a particular code path.
 
+## Pre-push Checklist
+
+**Always run both repro modes locally before pushing:**
+
+```bash
+uv run python repro.py                        # must deadlock (exit 1)
+uv run python repro.py --with-fix --timeout 120  # must complete (exit 0)
+```
+
 ## Environment
 
-- Requires `SENTRY_DSN` in `.env` (copy from `.env` template and set a valid DSN)
+- `SENTRY_DSN` defaults to `http://key@localhost/0` (devnull — no real Sentry project needed). Set in `.env` to send events to a real project.
 - Python >=3.12, managed via `uv`
 - No test suite — the reproduction itself is the test (exit 0 = success, hang/SIGABRT = deadlock confirmed)
+- CI runs both modes via GitHub Actions on every push to any branch

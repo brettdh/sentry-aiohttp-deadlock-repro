@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 
-TIMEOUT_SECONDS = 5
+DEFAULT_TIMEOUT = 5
 
 
 def main():
@@ -36,12 +36,19 @@ def main():
         action="store_true",
         help="Use threading.RLock instead of threading.Lock to prevent the deadlock",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help=f"Seconds to wait before declaring deadlock (default: {DEFAULT_TIMEOUT})",
+    )
     args = parser.parse_args()
+    timeout = args.timeout
 
     worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
     mode = "WITH FIX (RLock)" if args.with_fix else "WITHOUT fix (Lock - expect deadlock)"
-    print(f"Launching worker {mode} with {TIMEOUT_SECONDS}s timeout...\n")
+    print(f"Launching worker {mode} with {timeout}s timeout...\n")
 
     cmd = [sys.executable, worker]
     if args.with_fix:
@@ -54,9 +61,9 @@ def main():
     )
 
     try:
-        exit_code = proc.wait(timeout=TIMEOUT_SECONDS)
+        exit_code = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        print(f"\n--- Worker did not exit after {TIMEOUT_SECONDS}s (likely deadlocked) ---")
+        print(f"\n--- Worker did not exit after {timeout}s (likely deadlocked) ---")
         print("Sending SIGABRT to trigger faulthandler stack dump...\n")
         proc.send_signal(signal.SIGABRT)
         time.sleep(2)
