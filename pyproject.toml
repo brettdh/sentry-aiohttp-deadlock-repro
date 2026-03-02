@@ -12,6 +12,11 @@ dependencies = [
     # sentry-sdk. The repro code does NOT import OTel directly.
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
+    # OTel instrumentation automatically creates spans for tornado requests
+    # (in _prepare) and aiohttp client sessions, matching the production
+    # environment and stack trace.
+    "opentelemetry-instrumentation-tornado>=0.40b0",
+    "opentelemetry-instrumentation-aiohttp-client>=0.40b0",
     "tornado>=6.0",
     "python-dotenv>=1.0",
 ]

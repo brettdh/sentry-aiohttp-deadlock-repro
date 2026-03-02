@@ -1,22 +1,24 @@
 """
 Worker process for the deadlock reproduction. Launched by repro.py.
 
-Architecture matches production: Tornado web server handles incoming
-requests, and request handlers create aiohttp ClientSession objects.
-Sessions are intentionally leaked (not closed), creating cyclic garbage
-that the GC must finalize.
+Architecture matches production: Tornado web server with OTel
+instrumentation handles incoming requests. Request handlers leak
+aiohttp ClientSession objects, creating cyclic garbage that only
+the GC can finalize.
 
 The deadlock is same-thread re-entrance on BoundedList's threading.Lock:
-  1. BoundedList.extend() acquires Lock
-  2. An allocation inside extend() triggers Python's automatic GC
+  1. BoundedList.__iter__() acquires Lock (triggered by span export
+     serializing link/event data via to_json)
+  2. GCTriggeringLock calls gc.collect() while Lock is held
   3. GC finalizes leaked aiohttp sessions -> __del__ -> logging.error()
   4. Sentry logging integration -> capture_event -> serialize frame locals
-  5. Serializer finds BoundedList `self` in frame -> __iter__ -> Lock -> DEADLOCK
+  5. Serializer finds BoundedList `self` in __iter__'s frame
+     -> calls __iter__ again -> tries to acquire SAME Lock -> DEADLOCK
 
-In production this is extremely rare because BoundedList uses a deque
-internally - deque.extend() is a C-level operation with essentially zero
-GC-tracked Python allocations inside the locked section, so GC almost
-never fires while the lock is held.
+In production this is extremely rare because BoundedList operations
+on deques are C-level with essentially zero GC-tracked Python
+allocations inside the locked section, so GC almost never fires
+while the lock is held.
 
 To reproduce deterministically, we replace BoundedList's Lock with a
 wrapper that calls gc.collect() after acquiring. This simulates the rare
@@ -38,9 +40,10 @@ import tornado.web
 from dotenv import load_dotenv
 
 from opentelemetry import trace as otel_trace
+from opentelemetry.instrumentation.tornado import TornadoInstrumentor
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from opentelemetry.sdk.util import BoundedList
-from opentelemetry.trace import Link, SpanContext, TraceFlags
 from sentry_sdk.integrations.opentelemetry import SentrySpanProcessor
 
 load_dotenv()
@@ -50,24 +53,13 @@ SERVER_PORT = 8080
 CONCURRENCY = 10
 NUM_REQUESTS = 200
 
-# Dummy span links - forces BoundedList.from_seq -> extend() to be called
-# with a non-empty sequence. Without links, _new_links() just creates an
-# empty BoundedList (no extend, no lock acquisition, no deadlock chance).
-_dummy_ctx = SpanContext(
-    trace_id=0xDEADBEEF,
-    span_id=0xCAFEFACE,
-    is_remote=False,
-    trace_flags=TraceFlags(0x01),
-)
-SPAN_LINKS = [Link(_dummy_ctx)]
-
 
 class GCTriggeringLock:
     """A lock wrapper that calls gc.collect() after acquiring.
 
     This deterministically reproduces the rare production timing where
     Python's automatic GC fires during an allocation inside a locked
-    BoundedList method (extend/append/etc).
+    BoundedList method (extend/append/__iter__/etc).
 
     gc.collect() while the Lock is held -> finalizes leaked aiohttp sessions
     -> __del__ -> logging.error -> Sentry serializes frame locals -> finds
@@ -104,6 +96,37 @@ def patch_bounded_list(use_rlock=False):
     BoundedList.__init__ = _patched_init
 
 
+def init_otel():
+    """Set up OTel tracing globally, matching the production environment.
+
+    Production initializes OTel with instrumentation packages (Tornado,
+    aiohttp) BEFORE Sentry. The TracerProvider is configured with:
+    - SimpleSpanProcessor + ConsoleSpanExporter: exports spans synchronously
+      on the main thread. During export, to_json() iterates BoundedList
+      objects (events/links) via __iter__, acquiring their Lock. This is the
+      code path where GC can trigger the deadlock.
+    - SentrySpanProcessor: bridges OTel spans to Sentry transactions.
+    """
+    provider = TracerProvider()
+
+    # SimpleSpanProcessor exports synchronously during span.end() on the
+    # calling thread. ConsoleSpanExporter.export() calls span.to_json(),
+    # which iterates the span's BoundedList objects (_format_links,
+    # _format_events) via __iter__, acquiring each BoundedList's Lock.
+    # Discard the output - we only need the iteration side-effect.
+    devnull = open(os.devnull, "w")
+    provider.add_span_processor(
+        SimpleSpanProcessor(ConsoleSpanExporter(out=devnull))
+    )
+    provider.add_span_processor(SentrySpanProcessor())
+    otel_trace.set_tracer_provider(provider)
+
+    # Instrument Tornado: monkey-patches RequestHandler._execute so that
+    # _prepare() creates an OTel span for each incoming request, and
+    # on_finish() ends it (triggering the synchronous export above).
+    TornadoInstrumentor().instrument()
+
+
 def init_sentry():
     if not SENTRY_DSN:
         print("SENTRY_DSN not set in .env", flush=True)
@@ -117,18 +140,6 @@ def init_sentry():
     )
 
 
-def init_otel():
-    """Set up a real TracerProvider so spans create BoundedList with a Lock.
-
-    Without this, sentry-sdk 2.x only creates NonRecordingSpan (no
-    BoundedList, no Lock, no deadlock). In production, instrumentation
-    packages (e.g. opentelemetry-instrumentation-tornado) do this setup.
-    """
-    provider = TracerProvider()
-    provider.add_span_processor(SentrySpanProcessor())
-    otel_trace.set_tracer_provider(provider)
-
-
 class TargetHandler(tornado.web.RequestHandler):
     """Trivial endpoint (kept for potential future use)."""
 
@@ -139,17 +150,17 @@ class TargetHandler(tornado.web.RequestHandler):
 class LeakyHandler(tornado.web.RequestHandler):
     """Tornado handler that leaks aiohttp sessions (matching production).
 
-    Each request:
-    1. Creates an aiohttp ClientSession without closing it
-    2. Creates a cyclic self-reference so the session requires GC to collect
-    3. Creates a recording OTel span with links (BoundedList.extend + Lock)
-       -> GCTriggeringLock calls gc.collect() while Lock is held
-       -> GC finalizes the leaked session -> deadlock chain fires
+    Each request creates an aiohttp ClientSession without closing it,
+    with a cyclic self-reference so it requires GC to collect. The OTel
+    Tornado instrumentation automatically creates a span in _prepare()
+    for each request; when the span ends (after the handler completes),
+    SimpleSpanProcessor exports it synchronously, calling to_json() which
+    iterates BoundedList objects via __iter__. GCTriggeringLock then calls
+    gc.collect() while the Lock is held, collecting the leaked session
+    from this request -> deadlock chain fires.
 
     Note: the session doesn't need to make requests - just being unclosed
     is enough for __del__ to call logging.error via call_exception_handler.
-    Not making requests also avoids the event loop keeping the session
-    reachable through transport -> protocol -> connector references.
     """
 
     async def get(self):
@@ -163,26 +174,11 @@ class LeakyHandler(tornado.web.RequestHandler):
         # Only the GC's cycle detector can collect it.
         session._cycle = session
 
-        # Disable automatic GC BEFORE dropping the reference, so the
-        # session stays as uncollected cyclic garbage until gc.collect()
-        # is called explicitly inside the Lock.
-        gc.disable()
-
         # Drop the local reference. The session is now unreachable except
-        # through its self-cycle - pure cyclic garbage.
+        # through its self-cycle - pure cyclic garbage. Since automatic GC
+        # is disabled globally, the session stays uncollected until
+        # gc.collect() is called inside the Lock during span export.
         del session
-
-        # Create an OTel span with links. Span.__init__ -> _new_links ->
-        # BoundedList.from_seq -> BoundedList.extend(links): acquires Lock.
-        # GCTriggeringLock.__enter__ calls gc.collect() while Lock is held
-        # -> finalizes the leaked session -> __del__ -> logging.error ->
-        # Sentry -> serialize frame locals -> BoundedList.__iter__ ->
-        # same Lock -> DEADLOCK.
-        tracer = otel_trace.get_tracer(__name__)
-        span = tracer.start_span("handle-request", links=SPAN_LINKS)
-        span.end()
-
-        gc.enable()
 
         self.set_status(200)
         self.finish(b"ok")
@@ -225,9 +221,18 @@ async def main():
     args = parser.parse_args()
 
     faulthandler.enable()
-    init_sentry()
+
+    # Match production init order: OTel first, then Sentry.
+    # OTel sets up the TracerProvider with instrumentors and exporters.
+    # Sentry is initialized after, so it does NOT replace the TracerProvider.
     init_otel()
+    init_sentry()
     patch_bounded_list(use_rlock=args.with_fix)
+
+    # Disable automatic GC so leaked sessions accumulate as uncollected
+    # cyclic garbage. The only gc.collect() calls happen inside
+    # GCTriggeringLock when BoundedList acquires its lock.
+    gc.disable()
 
     lock_type = "RLock (fix applied)" if args.with_fix else "Lock (expect deadlock)"
 
