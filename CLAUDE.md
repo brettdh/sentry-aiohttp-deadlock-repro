@@ -29,9 +29,17 @@ uv run python repro.py --with-fix
 
 1. `span.end()` → `SimpleSpanProcessor.on_end()` → `ConsoleSpanExporter.export()` → `to_json()` → `BoundedList.__iter__()` acquires `threading.Lock`
 2. `gc.collect()` fires while lock is held (simulated by `GCTriggeringLock`, rare in production)
-3. GC finalizes leaked aiohttp `ClientSession` → `__del__` → `logging.error()`
+3. GC finalizes leaked aiohttp `ClientSession` → `__del__` → `call_exception_handler` → `logging.error()`
 4. Sentry logging integration → `capture_event` → serializes frame locals (`attach_stacktrace=True`)
 5. Serializer finds `BoundedList` as `self` in `__iter__()`'s frame → `__iter__` again → same lock → **deadlock**
+
+## Production vs Repro Code Path
+
+In production, the lock is acquired during `_prepare()` → `start_span()` → `Span.__init__()` → `BoundedList.from_seq()` → `extend()` because production spans have links. With the current OTel SDK version, `Span._new_links()` only calls `from_seq()` → `extend()` when links are non-empty; the Tornado instrumentation creates spans without links, so there is no BoundedList lock acquisition during `_prepare()`. The repro uses `SimpleSpanProcessor` to trigger the lock via `__iter__()` during synchronous export instead. The deadlock mechanism (same-thread re-entrance via GC) is identical.
+
+## Constraints
+
+- **Only patch the lock**: The only acceptable patch to third-party code is replacing `BoundedList`'s `threading.Lock` with `GCTriggeringLock`. Do NOT add extra method calls (e.g. `extend([])` in `__init__`), modify span creation, or otherwise alter third-party behavior to force a particular code path.
 
 ## Environment
 

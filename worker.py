@@ -7,13 +7,22 @@ aiohttp ClientSession objects, creating cyclic garbage that only
 the GC can finalize.
 
 The deadlock is same-thread re-entrance on BoundedList's threading.Lock:
-  1. BoundedList.__iter__() acquires Lock (triggered by span export
-     serializing link/event data via to_json)
+  1. span.end() -> SimpleSpanProcessor exports synchronously on the main
+     thread -> to_json() -> BoundedList.__iter__() acquires Lock
   2. GCTriggeringLock calls gc.collect() while Lock is held
-  3. GC finalizes leaked aiohttp sessions -> __del__ -> logging.error()
+  3. GC finalizes leaked aiohttp sessions -> __del__ ->
+     call_exception_handler -> logging.error()
   4. Sentry logging integration -> capture_event -> serialize frame locals
-  5. Serializer finds BoundedList `self` in __iter__'s frame
+  5. Serializer finds BoundedList `self` in __iter__()'s frame
      -> calls __iter__ again -> tries to acquire SAME Lock -> DEADLOCK
+
+Note: in production, the lock is acquired during _prepare() ->
+start_span() -> Span.__init__() -> BoundedList.from_seq() -> extend(),
+because production spans have links. With the current OTel SDK version,
+spans without links don't call extend(), so there's no lock acquisition
+during _prepare(). The repro uses SimpleSpanProcessor to trigger the
+lock via __iter__() during export instead, but the deadlock mechanism
+is identical.
 
 In production this is extremely rare because BoundedList operations
 on deques are C-level with essentially zero GC-tracked Python
@@ -157,7 +166,7 @@ class LeakyHandler(tornado.web.RequestHandler):
     SimpleSpanProcessor exports it synchronously, calling to_json() which
     iterates BoundedList objects via __iter__. GCTriggeringLock then calls
     gc.collect() while the Lock is held, collecting the leaked session
-    from this request -> deadlock chain fires.
+    from a previous request -> deadlock chain fires.
 
     Note: the session doesn't need to make requests - just being unclosed
     is enough for __del__ to call logging.error via call_exception_handler.
@@ -165,9 +174,6 @@ class LeakyHandler(tornado.web.RequestHandler):
 
     async def get(self):
         # Create an aiohttp session but don't close it.
-        # We don't make requests - just creating the session is enough
-        # for __del__ to fire. This also avoids event loop references
-        # that would prevent the session from becoming cyclic garbage.
         session = aiohttp.ClientSession()
 
         # Cyclic self-reference: prevents refcount from freeing the session.

@@ -1,17 +1,18 @@
 """
 Reproduce the GC-triggered deadlock between:
-  - OpenTelemetry BoundedList (holds a non-reentrant threading.Lock in extend())
+  - OpenTelemetry BoundedList (holds a non-reentrant threading.Lock)
   - Sentry serializer (iterates BoundedList via __iter__ while serializing frame locals)
-  - aiohttp TCPConnector.__del__ (fires during GC, logs an error about unclosed connector)
+  - aiohttp ClientSession.__del__ (fires during GC, logs an error about unclosed session)
 
 The deadlock is same-thread re-entrance via GC:
-  1. OTel Span.__init__ -> BoundedList.extend() ACQUIRES threading.Lock
-  2. An allocation inside extend() triggers Python's automatic GC
-  3. GC finalizes an unclosed aiohttp ClientSession/TCPConnector on the SAME thread
+  1. span.end() -> SimpleSpanProcessor exports synchronously -> to_json()
+     -> BoundedList.__iter__() ACQUIRES threading.Lock
+  2. GC fires while the lock is held (simulated deterministically)
+  3. GC finalizes an unclosed aiohttp ClientSession on the SAME thread
      -> __del__ -> asyncio.call_exception_handler -> logging.error()
   4. Sentry logging integration intercepts the log -> capture_event
      -> serialize current stack frames -> walk frame locals
-  5. Serializer finds `self` (the BoundedList) in extend()'s frame locals
+  5. Serializer finds `self` (the BoundedList) in __iter__()'s frame locals
      -> calls __iter__ -> tries to acquire the SAME Lock -> DEADLOCK
 
 This script launches worker.py as a subprocess with a timeout. If the
