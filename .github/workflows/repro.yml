@@ -1,0 +1,46 @@
+name: Deadlock reproduction
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+jobs:
+  deadlock:
+    name: Confirm deadlock (without fix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - name: Reproduce deadlock (expect hang + SIGABRT)
+        run: |
+          if uv run python repro.py; then
+            echo "::error::Expected deadlock but process completed successfully"
+            exit 1
+          else
+            echo "Deadlock confirmed (process hung and was killed as expected)"
+          fi
+
+  fix:
+    name: Verify RLock fix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - name: Run with RLock fix (should complete normally)
+        run: uv run python repro.py --with-fix
