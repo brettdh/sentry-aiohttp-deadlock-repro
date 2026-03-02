@@ -27,7 +27,11 @@ is identical.
 In production this is extremely rare because BoundedList operations
 on deques are C-level with essentially zero GC-tracked Python
 allocations inside the locked section, so GC almost never fires
-while the lock is held.
+while the lock is held. The likelihood of this increases with sufficient
+request volume, to the point where we can reproduce the issue reliably
+with our production application using a suite of UI-focused automated tests.
+After the issue manifests, the affected server can no longer serve any requests
+until it is restarted.
 
 To reproduce deterministically, we replace BoundedList's Lock with a
 wrapper that calls gc.collect() after acquiring. This simulates the rare
