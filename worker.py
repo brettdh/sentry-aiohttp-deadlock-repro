@@ -62,8 +62,9 @@ from sentry_sdk.integrations.opentelemetry import SentrySpanProcessor
 load_dotenv()
 
 # Default to a well-formed DSN pointing at localhost so the repro works without
-# configuring a real Sentry project (e.g. in CI). Nothing listens on localhost:80,
-# so connections are refused instantly and events are silently dropped.
+# configuring a real Sentry project (e.g. in CI). So long as nothing listens on localhost:80,
+# connections are refused instantly and events are silently dropped. And if something
+# is listening for some reason, it will get some nonsense requests; no big deal.
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "http://key@localhost/0")
 SERVER_PORT = 8080
 CONCURRENCY = 10
