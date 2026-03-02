@@ -57,7 +57,10 @@ from sentry_sdk.integrations.opentelemetry import SentrySpanProcessor
 
 load_dotenv()
 
-SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+# Default to a well-formed DSN pointing at localhost so the repro works without
+# configuring a real Sentry project (e.g. in CI). Nothing listens on localhost:80,
+# so connections are refused instantly and events are silently dropped.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "http://key@localhost/0")
 SERVER_PORT = 8080
 CONCURRENCY = 10
 NUM_REQUESTS = 200
@@ -137,10 +140,6 @@ def init_otel():
 
 
 def init_sentry():
-    if not SENTRY_DSN:
-        print("SENTRY_DSN not set in .env", flush=True)
-        sys.exit(1)
-
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         # attach_stacktrace makes Sentry serialize frame locals (including
