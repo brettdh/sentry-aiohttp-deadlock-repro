@@ -66,29 +66,43 @@ specific code path that acquires the `BoundedList` lock differs:
 
 | Branch | OTel SDK | Lock acquired during | Processor |
 |--------|----------|---------------------|-----------|
-| **`main`** (this branch) | latest (1.39+) | `span.end()` -> `to_json()` -> `__iter__()` | `SimpleSpanProcessor` |
-| [`production-versions`](../../tree/production-versions) | 1.20.0 | `_prepare()` -> `Span.__init__()` -> `extend()` | `BatchSpanProcessor` |
+| **`main`** (this branch) | 1.39.1 | `span.end()` -> [`to_json()`][v1.39.1-to_json] -> [`__iter__()`][v1.39.1-iter] | [`SimpleSpanProcessor`][v1.39.1-simple] |
+| [`production-versions`](../../tree/production-versions) | 1.20.0 | [`_prepare()`][v0.41b0-prepare] -> [`Span.__init__()`][v1.20.0-init] -> [`extend()`][v1.20.0-extend] | `BatchSpanProcessor` |
 
-**Why the code path differs:** In OTel SDK 1.20.0, `Span.__init__` checks
-`if links is None` (identity). Since `Tracer.start_span` defaults `links=()`
-(empty tuple), `() is not None` is `True`, so `BoundedList.from_seq()` ->
-`extend()` is always called, acquiring the lock during every span creation.
-In SDK 1.39.1+, this was changed to `if not links` (truthiness), and `not ()`
+**Why the code path differs:** In OTel SDK 1.20.0, [`Span.__init__`][v1.20.0-init] checks
+[`if links is None`][v1.20.0-links-check] (identity). Since [`Tracer.start_span`][v1.20.0-start_span] defaults `links=()`
+(empty tuple), `() is not None` is `True`, so [`BoundedList.from_seq()`][v1.20.0-from_seq] ->
+[`extend()`][v1.20.0-extend] is always called, acquiring the [lock][v1.20.0-lock] during every span creation.
+In SDK 1.39.1, this was changed to [`if not links`][v1.39.1-links-check] (truthiness), and `not ()`
 is `True`, so it short-circuits with no lock acquisition during span creation.
-This branch uses `SimpleSpanProcessor` to trigger the lock via `__iter__()`
+This branch uses [`SimpleSpanProcessor`][v1.39.1-simple] to trigger the lock via [`__iter__()`][v1.39.1-iter]
 during synchronous span export instead.
+
+[v1.20.0-init]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L741
+[v1.20.0-links-check]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L792
+[v1.20.0-start_span]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L1047-L1053
+[v1.20.0-lock]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L54
+[v1.20.0-extend]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L78-L84
+[v1.20.0-from_seq]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.20.0/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L86-L91
+[v1.39.1-links-check]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L825-L827
+[v1.39.1-to_json]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/trace/__init__.py#L486
+[v1.39.1-iter]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L67-L69
+[v1.39.1-simple]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/trace/export/__init__.py#L104-L109
+[v1.39.1-lock]: https://github.com/open-telemetry/opentelemetry-python/blob/v1.39.1/opentelemetry-sdk/src/opentelemetry/sdk/util/__init__.py#L56
+[v0.41b0-prepare]: https://github.com/open-telemetry/opentelemetry-python-contrib/blob/v0.41b0/instrumentation/opentelemetry-instrumentation-tornado/src/opentelemetry/instrumentation/tornado/__init__.py#L368-L382
+[v0.60b1-prepare]: https://github.com/open-telemetry/opentelemetry-python-contrib/blob/v0.60b1/instrumentation/opentelemetry-instrumentation-tornado/src/opentelemetry/instrumentation/tornado/__init__.py#L403-L421
 
 ## How it works
 
 The worker matches the production environment: OTel tracing is initialized
-globally with `TornadoInstrumentor` (and a `SimpleSpanProcessor` for
+globally with `TornadoInstrumentor` (and a [`SimpleSpanProcessor`][v1.39.1-simple] for
 synchronous export) **before** Sentry is initialized.
 
-The OTel Tornado instrumentation automatically creates a span in `_prepare()`
+The OTel Tornado instrumentation automatically creates a span in [`_prepare()`][v0.60b1-prepare]
 for each incoming request and ends it in `on_finish()`. When the span ends,
-`SimpleSpanProcessor` synchronously calls `ConsoleSpanExporter.export()`,
-which calls `to_json()` on the span. `to_json()` iterates the span's
-`BoundedList` objects (links, events) via `__iter__`, acquiring their Lock.
+[`SimpleSpanProcessor`][v1.39.1-simple] synchronously calls `ConsoleSpanExporter.export()`,
+which calls [`to_json()`][v1.39.1-to_json] on the span. `to_json()` iterates the span's
+`BoundedList` objects (links, events) via [`__iter__`][v1.39.1-iter], acquiring their [Lock][v1.39.1-lock].
 
 Each request handler:
 
@@ -99,8 +113,8 @@ Each request handler:
 
 Automatic GC is disabled globally; the only `gc.collect()` calls happen
 inside `GCTriggeringLock` (a wrapper that replaces BoundedList's Lock)
-when the lock is acquired. When `span.end()` triggers `to_json()` ->
-`BoundedList.__iter__()` -> `GCTriggeringLock.__enter__()` -> `gc.collect()`,
+when the lock is acquired. When `span.end()` triggers [`to_json()`][v1.39.1-to_json] ->
+[`BoundedList.__iter__()`][v1.39.1-iter] -> `GCTriggeringLock.__enter__()` -> `gc.collect()`,
 the leaked session from the current request is finalized, triggering the
 deadlock chain.
 
