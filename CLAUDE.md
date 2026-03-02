@@ -55,7 +55,7 @@ uv run python repro.py --with-fix --timeout 120  # must complete (exit 0)
 
 ## Environment
 
-- `SENTRY_DSN` defaults to `http://key@localhost/0` (devnull — no real Sentry project needed). Set in `.env` to send events to a real project.
+- `SENTRY_DSN` is optional. Defaults to `http://key@localhost/0` (events silently dropped). Set in `.env` to send events to a real Sentry project if the captured logging details are of interest.
 - Python >=3.12, managed via `uv`
 - No test suite — the reproduction itself is the test (exit 0 = success, hang/SIGABRT = deadlock confirmed)
 - CI runs both modes via GitHub Actions on every push to any branch

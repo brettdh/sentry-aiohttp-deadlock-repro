@@ -25,9 +25,11 @@ This is a **same-thread** deadlock caused by GC re-entrance:
 
 ```bash
 uv sync
-cp .env.example .env
-# Edit .env and set your SENTRY_DSN
 ```
+
+Optionally, set `SENTRY_DSN` in `.env` to send captured events to a real
+Sentry project (useful for inspecting the logging details that trigger the
+deadlock). If unset, a dummy DSN is used and events are silently dropped.
 
 ## Running
 
