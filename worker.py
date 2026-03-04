@@ -86,19 +86,51 @@ class GCTriggeringLock:
 
     def __init__(self, use_rlock=False):
         self._lock = threading.RLock() if use_rlock else threading.Lock()
+        self._owner = None  # thread ident of current holder
+
+    def _log_acquire(self, caller):
+        current = threading.current_thread()
+        owner = self._owner
+        if owner is not None:
+            if owner == current.ident:
+                print(
+                    f"[LOCK] {caller}: thread {current.name!r} (ident={current.ident}) "
+                    f"re-entering — already holds this lock",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[LOCK] {caller}: thread {current.name!r} (ident={current.ident}) "
+                    f"waiting — held by thread ident={owner}",
+                    flush=True,
+                )
+        else:
+            print(
+                f"[LOCK] {caller}: thread {current.name!r} (ident={current.ident}) "
+                f"acquiring (lock is free)",
+                flush=True,
+            )
 
     def __enter__(self):
+        self._log_acquire("__enter__")
         self._lock.acquire()
+        self._owner = threading.current_thread().ident
         gc.collect()
         return self
 
     def __exit__(self, *args):
+        self._owner = None
         self._lock.release()
 
     def acquire(self, *args, **kwargs):
-        return self._lock.acquire(*args, **kwargs)
+        self._log_acquire("acquire")
+        result = self._lock.acquire(*args, **kwargs)
+        if result:
+            self._owner = threading.current_thread().ident
+        return result
 
     def release(self):
+        self._owner = None
         self._lock.release()
 
 
