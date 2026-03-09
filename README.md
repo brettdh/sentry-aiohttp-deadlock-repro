@@ -57,6 +57,41 @@ lock). An `RLock` allows the same thread to acquire it multiple times without
 blocking, so the serializer's `__iter__` call succeeds and the process completes
 normally.
 
+## Sentry SDK workarounds
+
+Three Sentry SDK configuration changes were tested as potential workarounds
+that don't require patching third-party library code:
+
+| Flag | Prevents deadlock? | Why |
+|------|-------------------|-----|
+| `--ignore-asyncio-logger` | **Yes** | `ignore_logger("asyncio")` tells Sentry to skip events from the `asyncio` logger, breaking the deadlock chain at step 4 |
+| `--ignore-aiohttp-logger` | No | The deadlock-triggering log comes from the `asyncio` logger, not `aiohttp`. aiohttp's `__del__` calls `loop.call_exception_handler()`, which delegates to asyncio's `default_exception_handler` -> `logger.error()` on the `"asyncio"` logger |
+| `--disable-aiohttp-integration` | No | Sentry's `AioHttpIntegration` instruments HTTP request/response tracing. The deadlock is triggered through `LoggingIntegration`, which is a separate integration |
+
+### The effective workaround: `ignore_logger("asyncio")`
+
+```python
+from sentry_sdk.integrations.logging import ignore_logger
+ignore_logger("asyncio")
+```
+
+**Side effects:**
+
+- `logging.error()` (and above) from the `asyncio` logger will no longer
+  appear as Sentry events. This includes legitimate asyncio errors like
+  unhandled exceptions in tasks and slow callback warnings.
+- Breadcrumbs from the `asyncio` logger are also suppressed, so they won't
+  appear in breadcrumb trails of other Sentry events.
+- The logs themselves still go to Python's normal logging handlers (console,
+  file, etc.). Only Sentry's capture is affected.
+- Sentry's `AioHttpIntegration` for request tracing continues to work normally.
+
+In practice, the primary source of `asyncio` logger errors is the "Unclosed
+connector/session" noise from aiohttp `__del__` methods. The real fix is
+closing sessions properly (or patching OTel's `BoundedList` to use `RLock`),
+but `ignore_logger("asyncio")` is a safe and minimal workaround to deploy
+immediately while upstream fixes are pursued.
+
 ## Versions tested
 
 This branch uses the **latest** versions of all packages (`sentry-sdk>=2.0`,
