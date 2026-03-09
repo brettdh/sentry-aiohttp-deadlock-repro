@@ -5,18 +5,18 @@ description = "Minimal reproduction of GC-triggered deadlock between OpenTelemet
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9",
-    "sentry-sdk>=2.0",
-    # OTel SDK is needed at runtime: sentry-sdk 2.x uses it as its tracing
-    # backend (creating BoundedList objects with non-reentrant Locks).
-    # This matches the production environment where OTel is installed alongside
-    # sentry-sdk. The repro code does NOT import OTel directly.
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
-    # OTel instrumentation automatically creates spans for tornado requests
-    # (in _prepare) and aiohttp client sessions, matching the production
-    # environment and stack trace.
-    "opentelemetry-instrumentation-tornado>=0.40b0",
-    "opentelemetry-instrumentation-aiohttp-client>=0.40b0",
+    # Pin to production versions to reproduce the exact _prepare() -> extend()
+    # deadlock path. SDK 1.20.0 checks `if links is None` (identity), so the
+    # default links=() always triggers BoundedList.from_seq() -> extend().
+    # SDK 1.39.1+ changed this to `if not links` (truthiness), which
+    # short-circuits for empty tuple — see main branch for that variant.
+    "sentry-sdk==2.42.0",
+    "opentelemetry-api>=1.20,<1.21",
+    "opentelemetry-sdk>=1.20,<1.21",
+    "opentelemetry-instrumentation-tornado>=0.41b0,<0.42",
     "tornado>=6.0",
     "python-dotenv>=1.0",
+    # opentelemetry-instrumentation 0.41b0 uses pkg_resources, which was
+    # removed in setuptools 74+
+    "setuptools<74",
 ]
