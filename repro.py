@@ -42,6 +42,21 @@ def main():
         help="Use threading.RLock instead of threading.Lock to prevent the deadlock",
     )
     parser.add_argument(
+        "--ignore-asyncio-logger",
+        action="store_true",
+        help="Tell Sentry to ignore the 'asyncio' logger",
+    )
+    parser.add_argument(
+        "--ignore-aiohttp-logger",
+        action="store_true",
+        help="Tell Sentry to ignore the 'aiohttp' logger (ineffective: the log comes from the 'asyncio' logger)",
+    )
+    parser.add_argument(
+        "--disable-aiohttp-integration",
+        action="store_true",
+        help="Disable Sentry's AioHttpIntegration (ineffective: the deadlock is via LoggingIntegration, not AioHttpIntegration)",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=DEFAULT_TIMEOUT,
@@ -52,12 +67,27 @@ def main():
 
     worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
-    mode = "WITH FIX (RLock)" if args.with_fix else "WITHOUT fix (Lock - expect deadlock)"
-    print(f"Launching worker {mode} with {timeout}s timeout...\n")
+    flags = []
+    if args.with_fix:
+        flags.append("RLock fix")
+    if args.ignore_asyncio_logger:
+        flags.append("ignore asyncio logger")
+    if args.ignore_aiohttp_logger:
+        flags.append("ignore aiohttp logger")
+    if args.disable_aiohttp_integration:
+        flags.append("disable aiohttp integration")
+    mode = ", ".join(flags) if flags else "no workarounds (expect deadlock)"
+    print(f"Launching worker [{mode}] with {timeout}s timeout...\n")
 
     cmd = [sys.executable, worker]
     if args.with_fix:
         cmd.append("--with-fix")
+    if args.ignore_asyncio_logger:
+        cmd.append("--ignore-asyncio-logger")
+    if args.ignore_aiohttp_logger:
+        cmd.append("--ignore-aiohttp-logger")
+    if args.disable_aiohttp_integration:
+        cmd.append("--disable-aiohttp-integration")
 
     proc = subprocess.Popen(
         cmd,
