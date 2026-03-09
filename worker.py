@@ -176,13 +176,18 @@ def init_otel():
     TornadoInstrumentor().instrument()
 
 
-def init_sentry():
-    sentry_sdk.init(
+def init_sentry(disable_aiohttp_integration=False):
+    kwargs = dict(
         dsn=SENTRY_DSN,
         # attach_stacktrace makes Sentry serialize frame locals (including
         # BoundedList `self`) when capturing the logging event from __del__.
         attach_stacktrace=True,
     )
+    if disable_aiohttp_integration:
+        from sentry_sdk.integrations.aiohttp import AioHttpIntegration
+        # disabled_integrations prevents this integration from being auto-enabled
+        kwargs["disabled_integrations"] = [AioHttpIntegration()]
+    sentry_sdk.init(**kwargs)
 
 
 class TargetHandler(tornado.web.RequestHandler):
@@ -260,6 +265,21 @@ async def main():
         action="store_true",
         help="Use threading.RLock instead of threading.Lock to prevent the deadlock",
     )
+    parser.add_argument(
+        "--ignore-asyncio-logger",
+        action="store_true",
+        help="Tell Sentry to ignore the 'asyncio' logger (breaks the deadlock chain)",
+    )
+    parser.add_argument(
+        "--ignore-aiohttp-logger",
+        action="store_true",
+        help="Tell Sentry to ignore the 'aiohttp' logger (ineffective: the log comes from the 'asyncio' logger)",
+    )
+    parser.add_argument(
+        "--disable-aiohttp-integration",
+        action="store_true",
+        help="Disable Sentry's AioHttpIntegration (ineffective: the deadlock is via LoggingIntegration, not AioHttpIntegration)",
+    )
     args = parser.parse_args()
 
     faulthandler.enable()
@@ -268,7 +288,15 @@ async def main():
     # OTel sets up the TracerProvider with instrumentors and exporters.
     # Sentry is initialized after, so it does NOT replace the TracerProvider.
     init_otel()
-    init_sentry()
+    init_sentry(disable_aiohttp_integration=args.disable_aiohttp_integration)
+
+    if args.ignore_asyncio_logger or args.ignore_aiohttp_logger:
+        from sentry_sdk.integrations.logging import ignore_logger
+        if args.ignore_asyncio_logger:
+            ignore_logger("asyncio")
+        if args.ignore_aiohttp_logger:
+            ignore_logger("aiohttp")
+
     patch_bounded_list(use_rlock=args.with_fix)
 
     # Disable automatic GC so leaked sessions accumulate as uncollected
