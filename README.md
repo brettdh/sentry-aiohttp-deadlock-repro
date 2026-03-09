@@ -4,9 +4,10 @@ Minimal reproduction of a GC-triggered deadlock involving `sentry-sdk`,
 `aiohttp`, and the OpenTelemetry SDK (used internally by sentry-sdk 2.x
 as its tracing backend).
 
-> **This is the `production-versions` branch**, pinned to the exact package
-> versions from our production environment. See the [`main`](../../tree/main)
-> branch for a reproduction using the latest package versions.
+> **This is the `main` branch**, which uses the latest package versions.
+> See the [`production-versions`](../../tree/production-versions) branch
+> for a reproduction pinned to the exact versions from our production
+> environment.
 
 ## The deadlock chain
 
@@ -56,61 +57,12 @@ lock). An `RLock` allows the same thread to acquire it multiple times without
 blocking, so the serializer's `__iter__` call succeeds and the process completes
 normally.
 
-## Sentry SDK workarounds
-
-Three Sentry SDK configuration changes were tested as potential workarounds
-that don't require patching third-party library code:
-
-| Flag | Prevents deadlock? | Why |
-|------|-------------------|-----|
-| `--ignore-asyncio-logger` | **Yes** | `ignore_logger("asyncio")` tells Sentry to skip events from the `asyncio` logger, breaking the deadlock chain at step 4 |
-| `--ignore-aiohttp-logger` | No | The deadlock-triggering log comes from the `asyncio` logger, not `aiohttp`. aiohttp's `__del__` calls `loop.call_exception_handler()`, which delegates to asyncio's `default_exception_handler` -> `logger.error()` on the `"asyncio"` logger |
-| `--disable-aiohttp-integration` | No | Sentry's `AioHttpIntegration` instruments HTTP request/response tracing. The deadlock is triggered through `LoggingIntegration`, which is a separate integration |
-
-### The effective workaround: `ignore_logger("asyncio")`
-
-```python
-from sentry_sdk.integrations.logging import ignore_logger
-ignore_logger("asyncio")
-```
-
-**Side effects:**
-
-- `logging.error()` (and above) from the `asyncio` logger will no longer
-  appear as Sentry events. This includes legitimate asyncio errors like
-  unhandled exceptions in tasks and slow callback warnings.
-- Breadcrumbs from the `asyncio` logger are also suppressed, so they won't
-  appear in breadcrumb trails of other Sentry events.
-- The logs themselves still go to Python's normal logging handlers (console,
-  file, etc.). Only Sentry's capture is affected.
-- Sentry's `AioHttpIntegration` for request tracing continues to work normally.
-
-In practice, the primary source of `asyncio` logger errors is the "Unclosed
-connector/session" noise from aiohttp `__del__` methods. The real fix is
-closing sessions properly (or patching OTel's `BoundedList` to use `RLock`),
-but `ignore_logger("asyncio")` is a safe and minimal workaround to deploy
-immediately while upstream fixes are pursued.
-
 ## Versions tested
 
-This branch pins to the **exact production versions** where the deadlock was
-first observed. These versions are important because they determine which code
-path acquires the `BoundedList` lock:
-
-| Package | Version | Why pinned |
-|---------|---------|-----------|
-| `sentry-sdk` | 2.42.0 | Production version |
-| `opentelemetry-sdk` | 1.20.x | [`Span.__init__`][v1.20.0-init] uses [`if links is None`][v1.20.0-links-check] (identity check) — always calls [`extend()`][v1.20.0-extend] |
-| `opentelemetry-api` | 1.20.x | Matched to SDK |
-| `opentelemetry-instrumentation-tornado` | 0.41b0 | Production version; requires `setuptools<74` for `pkg_resources` |
-
-**Why these versions matter:** In OTel SDK 1.20.0, [`Span.__init__`][v1.20.0-init] checks
-[`if links is None`][v1.20.0-links-check] (identity). Since [`Tracer.start_span`][v1.20.0-start_span] defaults `links=()`
-(empty tuple), `() is not None` is `True`, so [`BoundedList.from_seq()`][v1.20.0-from_seq] ->
-[`extend()`][v1.20.0-extend] is always called, acquiring the [lock][v1.20.0-lock] during every span creation in
-[`_prepare()`][v0.41b0-prepare]. This matches the exact production stack trace. In SDK 1.39.1,
-this was changed to [`if not links`][v1.39.1-links-check] (truthiness), and `not ()` is `True`, so
-it short-circuits with no lock acquisition during span creation.
+This branch uses the **latest** versions of all packages (`sentry-sdk>=2.0`,
+`opentelemetry-sdk>=1.20`, etc.) to confirm the deadlock still exists in
+current releases. The deadlock mechanism is identical across versions, but the
+specific code path that acquires the `BoundedList` lock differs:
 
 | Branch | OTel SDK | Lock acquired during | Processor |
 |--------|----------|---------------------|-----------|
@@ -175,15 +127,15 @@ or so, with our specific production application and automated testing load).
 
 ## Dependencies
 
-- `sentry-sdk` (==2.42.0) - logging integration intercepts `logging.error()`
-  and serializes frame locals (`attach_stacktrace=True`)
+- `sentry-sdk` (>=2.0) - logging integration intercepts `logging.error()` and
+  serializes frame locals (`attach_stacktrace=True`)
 - `aiohttp` (>=3.9) - `ClientSession.__del__` fires during GC when sessions
   aren't closed
-- `opentelemetry-sdk` / `opentelemetry-api` (>=1.20, <1.21) - pinned to 1.20.x
-  for the [`if links is None`][v1.20.0-links-check] identity check in [`Span.__init__`][v1.20.0-init];
-  `BoundedList` uses a non-reentrant [`threading.Lock`][v1.20.0-lock]
-- `opentelemetry-instrumentation-tornado` (>=0.41b0, <0.42) - automatically
-  creates spans in [`_prepare()`][v0.41b0-prepare], triggering [`BoundedList.extend()`][v1.20.0-extend] under lock
+- `opentelemetry-sdk` / `opentelemetry-api` (>=1.20) - sentry-sdk uses these
+  internally for tracing; `BoundedList` uses a non-reentrant `threading.Lock`
+- `opentelemetry-instrumentation-tornado` (>=0.40b0) - automatically creates
+  spans for each request (matching production), triggering BoundedList lock
+  acquisition on export
+- `opentelemetry-instrumentation-aiohttp-client` (>=0.40b0) - instruments
+  aiohttp sessions (matching production environment)
 - `tornado` (>=6.0) - web server matching production architecture
-- `setuptools` (<74) - required by `opentelemetry-instrumentation` 0.41b0
-  which imports `pkg_resources` (removed in setuptools 74+)
