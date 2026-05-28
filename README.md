@@ -1,8 +1,7 @@
 # sentry-aiohttp-deadlock-repro
 
 Minimal reproduction of a GC-triggered deadlock involving `sentry-sdk`,
-`aiohttp`, and the OpenTelemetry SDK (used internally by sentry-sdk 2.x
-as its tracing backend).
+`aiohttp`, and the OpenTelemetry SDK.
 
 > **This is the `main` branch**, which uses the latest package versions.
 > See the [`production-versions`](../../tree/production-versions) branch
@@ -182,8 +181,8 @@ or so, with our specific production application and automated testing load).
   serializes frame locals (`attach_stacktrace=True`)
 - `aiohttp` (>=3.9) - `ClientSession.__del__` fires during GC when sessions
   aren't closed
-- `opentelemetry-sdk` / `opentelemetry-api` (>=1.20) - sentry-sdk uses these
-  internally for tracing; `BoundedList` uses a non-reentrant `threading.Lock`
+- `opentelemetry-sdk` / `opentelemetry-api` (>=1.20) - `BoundedList` uses a
+  non-reentrant `threading.Lock`
 - `opentelemetry-instrumentation-tornado` (>=0.40b0) - automatically creates
   spans for each request (matching production), triggering BoundedList lock
   acquisition on export
