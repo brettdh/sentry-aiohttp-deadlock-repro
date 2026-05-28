@@ -7,7 +7,9 @@ as its tracing backend).
 > **This is the `main` branch**, which uses the latest package versions.
 > See the [`production-versions`](../../tree/production-versions) branch
 > for a reproduction pinned to the exact versions from our production
-> environment.
+> environment, or the
+> [`verify-sentry-2.61.0-fix`](../../tree/verify-sentry-2.61.0-fix)
+> branch to confirm the fix in `sentry-sdk` 2.61.0.
 
 ## The deadlock chain
 
@@ -92,6 +94,19 @@ closing sessions properly (or patching OTel's `BoundedList` to use `RLock`),
 but `ignore_logger("asyncio")` is a safe and minimal workaround to deploy
 immediately while upstream fixes are pursued.
 
+## Resolution: `sentry-sdk` 2.61.0
+
+This deadlock was fixed in [`sentry-sdk` 2.61.0](https://github.com/getsentry/sentry-python/issues/5586).
+The serializer no longer calls `__iter__` on non-builtin `Sequence` subclasses
+(like OTel's `BoundedList`). Instead, it uses `__repr__`, which does not acquire
+any locks — breaking the deadlock chain at step 5.
+
+The [`verify-sentry-2.61.0-fix`](../../tree/verify-sentry-2.61.0-fix)
+branch pins `sentry-sdk==2.61.0` and confirms the deadlock no longer occurs
+without any workarounds (no `--with-fix`, no `--ignore-asyncio-logger`).
+
+With this fix, the workarounds above are no longer necessary.
+
 ## Versions tested
 
 This branch uses the **latest** versions of all packages (`sentry-sdk>=2.0`,
@@ -99,10 +114,11 @@ This branch uses the **latest** versions of all packages (`sentry-sdk>=2.0`,
 current releases. The deadlock mechanism is identical across versions, but the
 specific code path that acquires the `BoundedList` lock differs:
 
-| Branch | OTel SDK | Lock acquired during | Processor |
-|--------|----------|---------------------|-----------|
-| **`main`** (this branch) | 1.39.1 | `span.end()` -> [`to_json()`][v1.39.1-to_json] -> [`__iter__()`][v1.39.1-iter] | [`SimpleSpanProcessor`][v1.39.1-simple] |
-| [`production-versions`](../../tree/production-versions) | 1.20.0 | [`_prepare()`][v0.41b0-prepare] -> [`Span.__init__()`][v1.20.0-init] -> [`extend()`][v1.20.0-extend] | `BatchSpanProcessor` |
+| Branch | sentry-sdk | OTel SDK | Lock acquired during | Processor |
+|--------|-----------|----------|---------------------|-----------|
+| **`main`** (this branch) | >=2.0 | 1.39.1 | `span.end()` -> [`to_json()`][v1.39.1-to_json] -> [`__iter__()`][v1.39.1-iter] | [`SimpleSpanProcessor`][v1.39.1-simple] |
+| [`production-versions`](../../tree/production-versions) | 2.42.0 | 1.20.0 | [`_prepare()`][v0.41b0-prepare] -> [`Span.__init__()`][v1.20.0-init] -> [`extend()`][v1.20.0-extend] | `BatchSpanProcessor` |
+| [`verify-sentry-2.61.0-fix`](../../tree/verify-sentry-2.61.0-fix) | 2.61.0 | 1.20.0 | Same as `production-versions` | `BatchSpanProcessor` |
 
 **Why the code path differs:** In OTel SDK 1.20.0, [`Span.__init__`][v1.20.0-init] checks
 [`if links is None`][v1.20.0-links-check] (identity). Since [`Tracer.start_span`][v1.20.0-start_span] defaults `links=()`
